@@ -13,7 +13,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
 
-GENERATION_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.5-flash")
+GENERATION_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-3.5-flash")
 
 SYSTEM_INSTRUCTION = """
 Eres el asistente y biógrafo interactivo, cercano y con buen humor de Mireya.
