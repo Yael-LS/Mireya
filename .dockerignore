@@ -1,0 +1,15 @@
+.env
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+qdrant_local_data/
+
+.git/
+.gitignore
+
+tests/
+requirements-dev.txt
+
+README.md
