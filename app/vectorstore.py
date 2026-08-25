@@ -1,4 +1,5 @@
 import os
+import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
@@ -43,7 +44,10 @@ def ensure_collection(client: QdrantClient) -> None:
 def index_chunks(client: QdrantClient, chunks: list[Chunk], vectors: list[list[float]]) -> None:
     points = [
         PointStruct(
-            id=i,
+            # UUID estable para el perfil base; los recuerdos reciben un id de
+            # chunk único, de modo que no se sobrescriben ni se duplican en
+            # cada reinicio del servicio.
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"mireya:{chunks[i].id}")),
             vector=vectors[i],
             payload={"chunk_id": chunks[i].id, "section": chunks[i].section, "text": chunks[i].text},
         )

@@ -13,7 +13,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
 
-GENERATION_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-3.5-flash")
+GENERATION_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-3.6-flash")
 
 SYSTEM_INSTRUCTION = """
 Eres el asistente y biógrafo interactivo, cercano y con buen humor de Mireya.
@@ -60,12 +60,12 @@ def buscar_info_cv(query: str) -> str:
 
 class CVAgent:
 
-    def __init__(self):
+    def __init__(self, history: list[types.Content] | None = None):
         api_key = get_google_api_key()
         if not api_key:
             raise RuntimeError("Falta GOOGLE_GENAI_API_KEY en el entorno.")
         self.client = genai.Client(api_key=api_key)
-        self.history: list[types.Content] = []
+        self.history: list[types.Content] = history or []
 
     def _generation_config(self, user_message: str) -> types.GenerateContentConfig:
         """Recupera evidencia antes de generar para poder emitir tokens enseguida."""

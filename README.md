@@ -191,6 +191,9 @@ El servidor indexa automáticamente `data/cv.md` en Qdrant al arrancar (evento `
 | `COLLECTION_NAME` | Colección de Qdrant; por defecto `mireya_collection`. |
 | `CORS_ORIGINS` | Orígenes web separados por comas. Por defecto `*`; restringirlo al dominio de Vercel en producción. |
 | `SERVICE_API_KEY` | (Opcional) key propia para proteger el endpoint público |
+| `SUPABASE_URL` | URL del proyecto de Supabase para sesiones y mensajes |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key de Supabase; solo en el backend |
+| `DEFAULT_USER_ID` | Identificador temporal del usuario sin autenticación; por defecto `default` |
 
 ### Probar el endpoint
 
