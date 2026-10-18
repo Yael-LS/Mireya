@@ -12,22 +12,22 @@ from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.agent import CVAgent
 from app.database import get_supabase
+from app.ideas import router as ideas_router
+from app.profile_photo import router as profile_photo_router
+from app.refugio import classify_memory, router as refugio_router
 from app.retrieval import index_cv, ingest_memory
+from app.security import limiter, verify_api_key
 from google.genai import types
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
-
-# Limitador de tasa de peticiones por IP
-limiter = Limiter(key_func=get_remote_address)
 
 MAX_HISTORY_MESSAGES = 10
 MAX_MESSAGE_LENGTH = 2000
@@ -53,6 +53,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CV Agent - Open Responses API", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.include_router(refugio_router)
+app.include_router(ideas_router)
+app.include_router(profile_photo_router)
 
 # Por defecto acepta clientes web; en producción se puede restringir con CORS_ORIGINS.
 cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
@@ -63,9 +66,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-SERVICE_API_KEY = os.environ.get("SERVICE_API_KEY")
-
 
 # Schemas para la especificacion Open Responses adaptada
 class ContentPart(BaseModel):
@@ -110,6 +110,8 @@ class ResponsesResponse(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     title: str | None = None
+    # "nostalgia": la conversación nace de un momento del Refugio
+    mode: Literal["normal", "nostalgia"] = "normal"
 
 
 class RenameSessionRequest(BaseModel):
@@ -126,19 +128,6 @@ class IngestRequest(BaseModel):
     text: str
 
 
-# Autenticacion basada en Bearer token
-def verify_api_key(authorization: str | None) -> None:
-    if not SERVICE_API_KEY:
-        return
-
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Falta el header Authorization: Bearer <key>")
-
-    token = authorization.removeprefix("Bearer ").strip()
-    if token != SERVICE_API_KEY:
-        raise HTTPException(status_code=401, detail="API key invalida")
-
-
 def _extract_text_from_content(content: Union[str, List[ContentPart]]) -> str:
     if isinstance(content, str):
         return content
@@ -150,7 +139,7 @@ def _extract_text_from_content(content: Union[str, List[ContentPart]]) -> str:
 def _session_or_404(session_id: uuid.UUID) -> dict:
     result = (
         get_supabase().table("chat_sessions")
-        .select("id,title,created_at")
+        .select("*")
         .eq("id", str(session_id))
         .eq("user_id", DEFAULT_USER_ID)
         .maybe_single()
@@ -184,9 +173,12 @@ def _history_for_session(session_id: uuid.UUID) -> list[types.Content]:
 @app.post("/api/sessions", status_code=201)
 def create_session(body: CreateSessionRequest):
     title = (body.title or "Nueva conversación").strip()[:100] or "Nueva conversación"
-    result = get_supabase().table("chat_sessions").insert(
-        {"title": title, "user_id": DEFAULT_USER_ID}
-    ).execute()
+    row = {"title": title, "user_id": DEFAULT_USER_ID}
+    # Solo se escribe chat_mode cuando no es el valor por defecto, así las
+    # conversaciones normales funcionan aunque la migración no haya corrido.
+    if body.mode != "normal":
+        row["chat_mode"] = body.mode
+    result = get_supabase().table("chat_sessions").insert(row).execute()
     return result.data[0]
 
 
@@ -207,12 +199,32 @@ def get_session_messages(session_id: uuid.UUID):
     _session_or_404(session_id)
     result = (
         get_supabase().table("messages")
-        .select("id,role,content,created_at")
+        .select("*")
         .eq("session_id", str(session_id))
         .order("created_at")
         .execute()
     )
     return result.data or []
+
+
+class ReactionRequest(BaseModel):
+    hearted: bool
+
+
+@app.patch("/api/sessions/{session_id}/messages/{message_id}")
+def react_to_message(session_id: uuid.UUID, message_id: uuid.UUID, body: ReactionRequest):
+    """Reacción con corazón a un mensaje (como en WhatsApp)."""
+    _session_or_404(session_id)
+    result = (
+        get_supabase().table("messages")
+        .update({"hearted": body.hearted})
+        .eq("id", str(message_id))
+        .eq("session_id", str(session_id))
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="No encontré ese mensaje.")
+    return result.data[0]
 
 
 @app.patch("/api/sessions/{session_id}")
@@ -241,10 +253,14 @@ def ingest(request: Request, body: IngestRequest, authorization: str | None = He
     if len(text) > 10_000:
         raise HTTPException(status_code=400, detail="El recuerdo excede 10,000 caracteres.")
     try:
-        return {"ok": True, "chunks": ingest_memory(text)}
+        chunk_ids = ingest_memory(text)
     except Exception:
         logger.exception("Error al ingestar recuerdo")
         raise HTTPException(status_code=500, detail="No se pudo guardar el recuerdo en el RAG.")
+
+    # El recuerdo ya quedó guardado; si además le hace bien, también llega al Refugio.
+    added, suggestions = classify_memory(text, chunk_ids[0] if chunk_ids else None)
+    return {"ok": True, "chunks": len(chunk_ids), "refugio": added, "refugio_suggestions": suggestions}
 
 
 @app.post("/api/chat")
@@ -265,13 +281,13 @@ def chat_with_persistence(
 
     session = _session_or_404(body.session_id)
     db = get_supabase()
-    db.table("messages").insert({"session_id": str(body.session_id), "role": "user", "content": user_message}).execute()
+    user_row = db.table("messages").insert({"session_id": str(body.session_id), "role": "user", "content": user_message}).execute().data[0]
     if session["title"] == "Nueva conversación":
         db.table("chat_sessions").update({"title": user_message[:80]}).eq("id", str(body.session_id)).execute()
 
     # La consulta se realiza DESPUÉS de persistir el mensaje actual: Gemini ve
     # únicamente los últimos N mensajes de esta sesión, nunca todo Supabase.
-    agent = CVAgent(history=_history_for_session(body.session_id)[:-1])
+    agent = CVAgent(history=_history_for_session(body.session_id)[:-1], mode=session.get("chat_mode") or "normal")
     response_id = f"resp_{uuid.uuid4().hex}"
     created_at = int(time.time())
 
@@ -288,16 +304,18 @@ def chat_with_persistence(
         return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def stream_events():
-        yield sse_event("response.created", {"type": "response.created", "response": {"id": response_id, "object": "response", "model": "mireya-ai", "created_at": created_at, "status": "in_progress"}})
+        # Los ids de los mensajes viajan en el stream para poder reaccionar a ellos sin recargar.
+        yield sse_event("response.created", {"type": "response.created", "user_message_id": user_row["id"], "response": {"id": response_id, "object": "response", "model": "mireya-ai", "created_at": created_at, "status": "in_progress"}})
         parts: list[str] = []
         try:
             for text in agent.stream_chat(user_message):
                 parts.append(text)
                 yield sse_event("response.output_text.delta", {"type": "response.output_text.delta", "response_id": response_id, "delta": text})
             answer = "".join(parts)
+            message_id = None
             if answer:
-                db.table("messages").insert({"session_id": str(body.session_id), "role": "assistant", "content": answer}).execute()
-            yield sse_event("response.completed", {"type": "response.completed", "response": {"id": response_id, "object": "response", "model": "mireya-ai", "created_at": created_at, "status": "completed"}})
+                message_id = db.table("messages").insert({"session_id": str(body.session_id), "role": "assistant", "content": answer}).execute().data[0]["id"]
+            yield sse_event("response.completed", {"type": "response.completed", "message_id": message_id, "response": {"id": response_id, "object": "response", "model": "mireya-ai", "created_at": created_at, "status": "completed"}})
         except Exception:
             logger.exception("Error durante el streaming del agente")
             yield sse_event("error", {"type": "error", "message": "Error interno generando la respuesta"})

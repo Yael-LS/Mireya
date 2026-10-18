@@ -208,6 +208,7 @@ Su consumo cultural refleja una dualidad entre la nostalgia melancólica, la est
 ### 3.1 Música
 
 * **Taylor Swift** es su referente musical y emocional primordial. Conexión profunda con las eras ***1989***, ***Red***, ***Folklore*** y ***Evermore*** — con especial aprecio por las canciones menos obvias o "infravaloradas" de estas dos últimas.
+* **Su top de canciones de Taylor Swift**: **"Should've Said No"**, **"Picture To Burn"**, **"A Place in This World"**, **"The Way I Loved You (Taylor's Version)"** y **"You're Not Sorry (Taylor's Version)"**.
 * Busca a menudo correspondencias entre las canciones de la artista y sus propios rasgos de personalidad.
 * Ha recurrido a letras de Taylor Swift para expresar ideas emocionales, por ejemplo: *"never go out of style"* y *"You're on your own, kid."* La música funciona como lenguaje emocional: una letra puede decir algo que sería más difícil explicar directamente.
 * **Rock alternativo / paisajes melancólicos**: preferencia por canciones de alta carga lírica e instrumental como **"Let Down"** de Radiohead y **"Chasing Cars"** de Snow Patrol — referentes importantes en su paisaje sonoro.

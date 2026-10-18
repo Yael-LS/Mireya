@@ -35,5 +35,40 @@ create trigger messages_touch_session
 after insert on public.messages
 for each row execute function public.touch_chat_session();
 
+-- Modo de la conversación: "nostalgia" cuando nace de un momento del Refugio.
+-- ("chat_mode" y no "mode": PostgREST confunde "mode" con la función de agregado).
+alter table public.chat_sessions add column if not exists chat_mode text not null default 'normal';
+
+-- El Refugio: todo lo que le hace bien a Mireya (canciones, series, momentos…).
+create table if not exists public.refugio_items (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null check (kind in ('song', 'series', 'kdrama', 'anime', 'movie', 'book', 'quote', 'moment', 'other')),
+  title text not null check (char_length(title) > 0),
+  creator text,
+  note text,
+  url text,
+  photo_path text,
+  moment_date date,
+  source text not null default 'manual' check (source in ('profile', 'memory', 'manual')),
+  source_ref text,
+  confidence real,
+  hidden boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists refugio_items_kind_idx on public.refugio_items (kind, created_at desc);
+
+-- Reacción con corazón a un mensaje.
+alter table public.messages add column if not exists hearted boolean not null default false;
+
+-- Caja de ideas: lo que a Mireya le gustaría que su scrapbook tuviera después.
+create table if not exists public.scrapbook_ideas (
+  id uuid primary key default gen_random_uuid(),
+  text text not null check (char_length(text) between 1 and 300),
+  done boolean not null default false,
+  done_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
 -- El backend usa SUPABASE_SERVICE_ROLE_KEY. Si se habilita acceso directo desde
 -- el navegador, activa RLS y crea políticas ligadas a auth.uid() antes de ello.

@@ -31,11 +31,12 @@ def retrieve(query: str, top_k: int = 4) -> list[dict]:
     return results
 
 
-def ingest_memory(text: str) -> int:
-    """Vectoriza un recuerdo libre y lo añade a la colección RAG existente."""
+def ingest_memory(text: str) -> list[str]:
+    """Vectoriza un recuerdo libre, lo añade a la colección RAG existente y
+    devuelve los ids de sus chunks."""
     clean_text = text.strip()
     if not clean_text:
-        return 0
+        return []
 
     # Para una entrada de UI se conserva el texto completo como una unidad
     # semántica; se etiqueta para distinguirlo del perfil base en recuperación.
@@ -44,4 +45,4 @@ def ingest_memory(text: str) -> int:
     client = app.vectorstore.get_client()
     app.vectorstore.ensure_collection(client)
     app.vectorstore.index_chunks(client, chunks, vectors)
-    return len(chunks)
+    return [chunk.id for chunk in chunks]
