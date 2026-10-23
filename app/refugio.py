@@ -22,6 +22,7 @@ from google.genai import errors, types
 from pydantic import BaseModel, Field
 
 import app.vectorstore
+from app.agent import FALLBACK_MODELS, THINKING, config_for
 from app.chunking import load_and_chunk
 from app.config import COLLECTION_NAME, get_google_api_key
 from app.database import get_supabase
@@ -39,7 +40,6 @@ KINDS = ("song", "series", "kdrama", "anime", "movie", "book", "quote", "moment"
 Kind = Literal["song", "series", "kdrama", "anime", "movie", "book", "quote", "moment", "other"]
 
 CLASSIFIER_MODEL = os.getenv("GOOGLE_GENAI_EXTRACTION_MODEL", "gemini-3.5-flash-lite")
-FALLBACK_MODEL = os.getenv("GOOGLE_GENAI_FALLBACK_MODEL", "gemini-3.5-flash")
 AUTO_ADD_CONFIDENCE = 0.75   # se agrega solo
 SUGGEST_CONFIDENCE = 0.45    # se le pregunta a ella antes de agregar
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
@@ -147,14 +147,16 @@ def _genai() -> genai.Client:
 
 
 def _generate(contents: str, config: types.GenerateContentConfig):
-    """Modelo ligero primero; si está saturado (5xx/429), el de respaldo."""
+    """Modelo ligero primero; si está saturado (5xx/429) o Google lo retiró
+    (404), el de respaldo."""
+    config.thinking_config = config.thinking_config or THINKING
     last_error: Exception | None = None
-    for model in dict.fromkeys([CLASSIFIER_MODEL, FALLBACK_MODEL]):
+    for model in dict.fromkeys([CLASSIFIER_MODEL, *FALLBACK_MODELS]):
         try:
-            return _genai().models.generate_content(model=model, contents=contents, config=config)
+            return _genai().models.generate_content(model=model, contents=contents, config=config_for(model, config))
         except errors.APIError as exc:
             last_error = exc
-            if not (isinstance(exc, errors.ServerError) or exc.code == 429):
+            if not (isinstance(exc, errors.ServerError) or exc.code in (404, 429)):
                 raise
             logger.warning(f"{model} no disponible para el Refugio ({exc.code}), probando respaldo")
     raise last_error  # type: ignore[misc]

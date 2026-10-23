@@ -10,17 +10,23 @@ import app.vectorstore
 def index_cv(filepath: str) -> int:
     chunks = load_and_chunk(filepath)
 
-    texts = [c.text for c in chunks]
-    vectors = embed_documents(texts)
-
     client = app.vectorstore.get_client()
     app.vectorstore.ensure_collection(client)
-    app.vectorstore.index_chunks(client, chunks, vectors)
+
+    # Solo se vectoriza lo que cambió: cada arranque gastaba 54 embeddings del
+    # límite gratuito (100/min) aunque el perfil fuera idéntico.
+    stored = app.vectorstore.stored_texts(client, [app.vectorstore.point_id(c.id) for c in chunks])
+    changed = [c for c in chunks if stored.get(app.vectorstore.point_id(c.id)) != c.text]
+    if changed:
+        vectors = embed_documents([c.text for c in changed])
+        app.vectorstore.index_chunks(client, changed, vectors)
+
     removed = app.vectorstore.delete_stale_profile_points(
         client, {app.vectorstore.point_id(c.id) for c in chunks}
     )
-    if removed:
-        logging.getLogger("retrieval").info(f"Se borraron {removed} chunks viejos del perfil.")
+    logging.getLogger("retrieval").info(
+        f"Perfil: {len(changed)} chunks nuevos o cambiados, {len(chunks) - len(changed)} sin cambios, {removed} borrados."
+    )
 
     return len(chunks)
 

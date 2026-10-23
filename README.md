@@ -149,8 +149,10 @@ Si la extracción o Spotify fallan, el agente responde igual, solo que sin enlac
 
 `_stream_with_resilience` en `agent.py`:
 
-- Modelo principal `GOOGLE_GENAI_MODEL` (por defecto `gemini-3.6-flash`) y respaldo `GOOGLE_GENAI_FALLBACK_MODEL` (por defecto `gemini-3.5-flash`).
-- Un reintento por modelo, con 1.5 s de espera, solo ante errores transitorios (5xx, 429, timeouts o errores de conexión).
+- Modelo principal `GOOGLE_GENAI_MODEL` (por defecto `gemini-3-flash-preview`) y una lista de respaldos `GOOGLE_GENAI_FALLBACK_MODEL` separados por comas (por defecto `gemma-4-26b-a4b-it,gemini-3.6-flash`).
+- **Por qué esos modelos (medido en oct 2026, plan gratuito):** el plan gratuito da ~20 peticiones diarias *por modelo*, así que cada respaldo debe tener cuota propia. `gemini-3.5-flash` hoy comparte la cuota de `gemini-3.6-flash` y la familia 2.5 ya no está disponible para cuentas nuevas. Los alias `*-latest` se evitan porque cambian de modelo sin aviso.
+- Pensamiento al mínimo (`GOOGLE_GENAI_THINKING_LEVEL=MINIMAL`): los modelos flash gastaban 700–1400 tokens ocultos por respuesta; con el mínimo la primera palabra sale en ~1 s de generación. Gemma no lo usa.
+- Un reintento por modelo, con 1.5 s de espera, ante errores transitorios (5xx, timeouts o errores de conexión). Un 429 (cuota agotada) pasa directo al siguiente modelo.
 - Solo se reintenta o se cambia de modelo si **aún no se ha enviado texto** al usuario, para no duplicar ni cortar la respuesta.
 - Un stream que termina sin texto se trata como error (`EmptyModelResponse`) y se registra el `finish_reason`, en vez de dejar al usuario esperando.
 - Timeout de 30 s por petición a Gemini.
@@ -242,8 +244,9 @@ El frontend busca el backend en `BACKEND_URL` (también acepta `API_URL` o `NEXT
 | Variable | Descripción |
 |---|---|
 | `GOOGLE_GENAI_API_KEY` | API key de Google GenAI (embeddings + generación). También se aceptan `GOOGLE_API_KEY` y `GEMINI_API_KEY`. |
-| `GOOGLE_GENAI_MODEL` | Modelo de generación; por defecto `gemini-3.6-flash`. |
-| `GOOGLE_GENAI_FALLBACK_MODEL` | Modelo de respaldo; por defecto `gemini-3.5-flash`. |
+| `GOOGLE_GENAI_MODEL` | Modelo de generación; por defecto `gemini-3-flash-preview`. |
+| `GOOGLE_GENAI_FALLBACK_MODEL` | Respaldos separados por comas; por defecto `gemma-4-26b-a4b-it,gemini-3.6-flash`. |
+| `GOOGLE_GENAI_THINKING_LEVEL` | Nivel de "pensamiento" de los modelos Gemini; por defecto `MINIMAL`. |
 | `GOOGLE_GENAI_EXTRACTION_MODEL` | Modelo para extraer menciones musicales; por defecto `gemini-3.5-flash-lite`. |
 | `QDRANT_URL` | URL del cluster de Qdrant Cloud (incluye el puerto `:6333`). |
 | `QDRANT_API_KEY` | API key del cluster de Qdrant. |

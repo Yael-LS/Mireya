@@ -62,6 +62,12 @@ def index_chunks(client: QdrantClient, chunks: list[Chunk], vectors: list[list[f
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
 
+# Texto guardado de cada punto, para saber qué chunks no cambiaron
+def stored_texts(client: QdrantClient, ids: list[str]) -> dict[str, str]:
+    points = client.retrieve(COLLECTION_NAME, ids=ids, with_payload=True, with_vectors=False)
+    return {str(p.id): (p.payload or {}).get("text", "") for p in points}
+
+
 # Borra los puntos del perfil que ya no existen (versiones anteriores del
 # perfil o del chunking); los recuerdos de Mireya nunca se tocan.
 def delete_stale_profile_points(client: QdrantClient, keep_ids: set[str]) -> int:
