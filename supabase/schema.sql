@@ -58,6 +58,14 @@ create table if not exists public.refugio_items (
 
 create index if not exists refugio_items_kind_idx on public.refugio_items (kind, created_at desc);
 
+-- Clave del Refugio (una sola fila; solo el hash PBKDF2, nunca la clave).
+create table if not exists public.refugio_lock (
+  id int primary key default 1 check (id = 1),
+  pin_hash text not null,
+  hint text,
+  updated_at timestamptz not null default now()
+);
+
 -- Reacción con corazón a un mensaje.
 alter table public.messages add column if not exists hearted boolean not null default false;
 

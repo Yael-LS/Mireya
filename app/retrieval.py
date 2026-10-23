@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from app.chunking import Chunk, load_and_chunk
@@ -15,6 +16,11 @@ def index_cv(filepath: str) -> int:
     client = app.vectorstore.get_client()
     app.vectorstore.ensure_collection(client)
     app.vectorstore.index_chunks(client, chunks, vectors)
+    removed = app.vectorstore.delete_stale_profile_points(
+        client, {app.vectorstore.point_id(c.id) for c in chunks}
+    )
+    if removed:
+        logging.getLogger("retrieval").info(f"Se borraron {removed} chunks viejos del perfil.")
 
     return len(chunks)
 

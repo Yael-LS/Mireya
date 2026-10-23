@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Literal, Union, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import Depends, FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -19,15 +19,27 @@ from app.agent import CVAgent
 from app.database import get_supabase
 from app.ideas import router as ideas_router
 from app.profile_photo import router as profile_photo_router
+from app.refugio_lock import router as refugio_lock_router
 from app.refugio import classify_memory, router as refugio_router
 from app.retrieval import index_cv, ingest_memory
-from app.security import limiter, verify_api_key
+from app.security import limiter, require_api_key, verify_api_key
 from google.genai import types
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
+
+
+class _SkipHealthChecks(logging.Filter):
+    """Render consulta /health cada pocos segundos; esas líneas tapan los logs útiles."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        path = record.args[2] if isinstance(record.args, tuple) and len(record.args) > 2 else ""
+        return path != "/health"
+
+
+logging.getLogger("uvicorn.access").addFilter(_SkipHealthChecks())
 
 MAX_HISTORY_MESSAGES = 10
 MAX_MESSAGE_LENGTH = 2000
@@ -45,14 +57,22 @@ SUSPICIOUS_PATTERNS = re.compile(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Indexando CV en Qdrant...")
-    n = index_cv("data/mireya_profile.md")
-    logger.info(f"CV indexado correctamente: {n} chunks.")
+    try:
+        n = index_cv("data/mireya_profile.md")
+        logger.info(f"CV indexado correctamente: {n} chunks.")
+    except Exception:
+        # Ej. cuota de embeddings agotada por reinicios seguidos: los chunks del
+        # arranque anterior siguen en Qdrant, así que el servicio puede responder.
+        logger.exception("No se pudo reindexar el perfil; se usa lo que ya está en Qdrant")
+    if not os.getenv("SERVICE_API_KEY"):
+        logger.warning("SERVICE_API_KEY no está definida: la API queda abierta para cualquiera con la URL.")
     yield
 
 
 app = FastAPI(title="CV Agent - Open Responses API", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.include_router(refugio_lock_router)
 app.include_router(refugio_router)
 app.include_router(ideas_router)
 app.include_router(profile_photo_router)
@@ -170,7 +190,7 @@ def _history_for_session(session_id: uuid.UUID) -> list[types.Content]:
     ]
 
 
-@app.post("/api/sessions", status_code=201)
+@app.post("/api/sessions", status_code=201, dependencies=[Depends(require_api_key)])
 def create_session(body: CreateSessionRequest):
     title = (body.title or "Nueva conversación").strip()[:100] or "Nueva conversación"
     row = {"title": title, "user_id": DEFAULT_USER_ID}
@@ -182,7 +202,7 @@ def create_session(body: CreateSessionRequest):
     return result.data[0]
 
 
-@app.get("/api/sessions")
+@app.get("/api/sessions", dependencies=[Depends(require_api_key)])
 def list_sessions():
     result = (
         get_supabase().table("chat_sessions")
@@ -194,7 +214,7 @@ def list_sessions():
     return result.data or []
 
 
-@app.get("/api/sessions/{session_id}/messages")
+@app.get("/api/sessions/{session_id}/messages", dependencies=[Depends(require_api_key)])
 def get_session_messages(session_id: uuid.UUID):
     _session_or_404(session_id)
     result = (
@@ -211,7 +231,7 @@ class ReactionRequest(BaseModel):
     hearted: bool
 
 
-@app.patch("/api/sessions/{session_id}/messages/{message_id}")
+@app.patch("/api/sessions/{session_id}/messages/{message_id}", dependencies=[Depends(require_api_key)])
 def react_to_message(session_id: uuid.UUID, message_id: uuid.UUID, body: ReactionRequest):
     """Reacción con corazón a un mensaje (como en WhatsApp)."""
     _session_or_404(session_id)
@@ -227,7 +247,7 @@ def react_to_message(session_id: uuid.UUID, message_id: uuid.UUID, body: Reactio
     return result.data[0]
 
 
-@app.patch("/api/sessions/{session_id}")
+@app.patch("/api/sessions/{session_id}", dependencies=[Depends(require_api_key)])
 def rename_session(session_id: uuid.UUID, body: RenameSessionRequest):
     _session_or_404(session_id)
     title = body.title.strip()[:100]
@@ -237,7 +257,7 @@ def rename_session(session_id: uuid.UUID, body: RenameSessionRequest):
     return result.data[0]
 
 
-@app.delete("/api/sessions/{session_id}", status_code=204)
+@app.delete("/api/sessions/{session_id}", status_code=204, dependencies=[Depends(require_api_key)])
 def delete_session(session_id: uuid.UUID):
     _session_or_404(session_id)
     get_supabase().table("chat_sessions").delete().eq("id", str(session_id)).execute()

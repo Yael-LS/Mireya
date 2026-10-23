@@ -1,7 +1,7 @@
 import os
 import uuid
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, PointIdsList, PointStruct, VectorParams
 
 from app.chunking import Chunk
 from app.config import COLLECTION_NAME
@@ -40,20 +40,44 @@ def ensure_collection(client: QdrantClient) -> None:
         )
 
 
+MEMORY_SECTION = "Nuevo recuerdo"
+
+
+def point_id(chunk_id: str) -> str:
+    # UUID estable para el perfil base; los recuerdos reciben un id de chunk
+    # único, de modo que no se sobrescriben ni se duplican en cada reinicio.
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mireya:{chunk_id}"))
+
+
 # Indexa los chunks y sus vectores almacenando el texto en el payload
 def index_chunks(client: QdrantClient, chunks: list[Chunk], vectors: list[list[float]]) -> None:
     points = [
         PointStruct(
-            # UUID estable para el perfil base; los recuerdos reciben un id de
-            # chunk único, de modo que no se sobrescriben ni se duplican en
-            # cada reinicio del servicio.
-            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"mireya:{chunks[i].id}")),
+            id=point_id(chunks[i].id),
             vector=vectors[i],
             payload={"chunk_id": chunks[i].id, "section": chunks[i].section, "text": chunks[i].text},
         )
         for i in range(len(chunks))
     ]
     client.upsert(collection_name=COLLECTION_NAME, points=points)
+
+
+# Borra los puntos del perfil que ya no existen (versiones anteriores del
+# perfil o del chunking); los recuerdos de Mireya nunca se tocan.
+def delete_stale_profile_points(client: QdrantClient, keep_ids: set[str]) -> int:
+    stale = []
+    offset = None
+    while True:
+        points, offset = client.scroll(COLLECTION_NAME, limit=200, offset=offset, with_payload=True, with_vectors=False)
+        stale += [
+            p.id for p in points
+            if (p.payload or {}).get("section") != MEMORY_SECTION and str(p.id) not in keep_ids
+        ]
+        if offset is None:
+            break
+    if stale:
+        client.delete(COLLECTION_NAME, points_selector=PointIdsList(points=stale))
+    return len(stale)
 
 
 # Busca los k vectores mas cercanos a la consulta

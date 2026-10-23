@@ -3,7 +3,7 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import HTTPException
+from fastapi import Header, HTTPException
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -26,3 +26,8 @@ def verify_api_key(authorization: str | None) -> None:
     token = authorization.removeprefix("Bearer ").strip()
     if token != SERVICE_API_KEY:
         raise HTTPException(status_code=401, detail="API key invalida")
+
+
+def require_api_key(authorization: str | None = Header(default=None)) -> None:
+    """Dependencia de FastAPI para rutas que no reciben el header explícitamente."""
+    verify_api_key(authorization)
