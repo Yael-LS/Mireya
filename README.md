@@ -105,7 +105,7 @@ Una sola aplicación FastAPI con módulos internos (`chunking`, `embeddings`, `v
 ### 3. Fuente de información: Markdown estructurado + recuerdos
 
 - **Perfil base:** `data/mireya_profile.md`, organizado por secciones `##` (formación, psicología organizacional, proyectos, música, cultura pop, estética, etc.).
-- **Recuerdos:** texto libre que se agrega en tiempo de ejecución con `POST /api/ingest`. Cada recuerdo se indexa como un chunk propio con la sección `"Nuevo recuerdo"`.
+- **Recuerdos:** texto libre que se agrega en tiempo de ejecución con `POST /api/ingest`. Cada recuerdo se indexa como un chunk propio con la sección `"Nuevo recuerdo"` y su fecha de alta en el payload (`created_at`, ISO 8601 en UTC). Los recuerdos anteriores al 26/oct/2026 no tienen fecha.
 
 Un documento de texto es el formato que mejor se presta a búsqueda semántica para este tipo de información (gustos, anécdotas, forma de pensar), que no mapea bien a consultas exactas tipo SQL.
 
@@ -153,7 +153,8 @@ Si la extracción o Spotify fallan, el agente responde igual, solo que sin enlac
 - **Por qué esos modelos (medido en oct 2026, plan gratuito):** el plan gratuito da ~20 peticiones diarias *por modelo*, así que cada respaldo debe tener cuota propia. `gemini-3.5-flash` hoy comparte la cuota de `gemini-3.6-flash` y la familia 2.5 ya no está disponible para cuentas nuevas. Los alias `*-latest` se evitan porque cambian de modelo sin aviso.
 - Pensamiento al mínimo (`GOOGLE_GENAI_THINKING_LEVEL=MINIMAL`): los modelos flash gastaban 700–1400 tokens ocultos por respuesta; con el mínimo la primera palabra sale en ~1 s de generación. Gemma no lo usa.
 - Un reintento por modelo, con 1.5 s de espera, ante errores transitorios (5xx, timeouts o errores de conexión). Un 429 (cuota agotada) pasa directo al siguiente modelo.
-- Solo se reintenta o se cambia de modelo si **aún no se ha enviado texto** al usuario, para no duplicar ni cortar la respuesta.
+- Si el fallo llega **a media respuesta** (p. ej. un `504 DEADLINE_EXCEEDED`), se emite el evento SSE `response.output_text.reset`: el frontend borra el texto parcial y la respuesta vuelve a empezar con el siguiente intento o modelo.
+- El mensaje del usuario se guarda **antes** de generar. Si todos los intentos fallan, queda guardado sin respuesta y `POST /api/chat` con `{"session_id": ..., "retry": true}` responde ese último mensaje pendiente sin duplicarlo (el frontend lo ofrece con un botón).
 - Un stream que termina sin texto se trata como error (`EmptyModelResponse`) y se registra el `finish_reason`, en vez de dejar al usuario esperando.
 - Timeout de 30 s por petición a Gemini.
 

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from app.agent import CVAgent
+from app.agent import CVAgent, STREAM_RESET
 from app.database import get_supabase
 from app.ideas import router as ideas_router
 from app.profile_photo import router as profile_photo_router
@@ -140,8 +140,11 @@ class RenameSessionRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     session_id: uuid.UUID
-    message: str
+    message: str = ""
     stream: bool = True
+    # Responder el último mensaje ya guardado que se quedó sin respuesta, sin
+    # que ella tenga que volver a escribirlo.
+    retry: bool = False
 
 
 class IngestRequest(BaseModel):
@@ -291,19 +294,30 @@ def chat_with_persistence(
     authorization: str | None = Header(default=None),
 ):
     verify_api_key(authorization)
-    user_message = body.message.strip()
-    if not user_message:
-        raise HTTPException(status_code=422, detail="El mensaje no puede estar vacío.")
-    if len(user_message) > MAX_MESSAGE_LENGTH:
-        raise HTTPException(status_code=400, detail=f"Mensaje demasiado largo (máx {MAX_MESSAGE_LENGTH} caracteres)")
-    if SUSPICIOUS_PATTERNS.search(user_message):
-        logger.warning(f"[posible_injection] mensaje sospechoso recibido: {user_message[:200]!r}")
-
     session = _session_or_404(body.session_id)
     db = get_supabase()
-    user_row = db.table("messages").insert({"session_id": str(body.session_id), "role": "user", "content": user_message}).execute().data[0]
-    if session["title"] == "Nueva conversación":
-        db.table("chat_sessions").update({"title": user_message[:80]}).eq("id", str(body.session_id)).execute()
+
+    if body.retry:
+        last = (
+            db.table("messages").select("*").eq("session_id", str(body.session_id))
+            .order("created_at", desc=True).limit(1).execute().data
+        )
+        if not last or last[0]["role"] != "user":
+            raise HTTPException(status_code=409, detail="Esta conversación no tiene mensajes pendientes de respuesta.")
+        user_row = last[0]
+        user_message = user_row["content"]
+        logger.info(f"[reintento] respondiendo mensaje pendiente {user_row['id']}")
+    else:
+        user_message = body.message.strip()
+        if not user_message:
+            raise HTTPException(status_code=422, detail="El mensaje no puede estar vacío.")
+        if len(user_message) > MAX_MESSAGE_LENGTH:
+            raise HTTPException(status_code=400, detail=f"Mensaje demasiado largo (máx {MAX_MESSAGE_LENGTH} caracteres)")
+        if SUSPICIOUS_PATTERNS.search(user_message):
+            logger.warning(f"[posible_injection] mensaje sospechoso recibido: {user_message[:200]!r}")
+        user_row = db.table("messages").insert({"session_id": str(body.session_id), "role": "user", "content": user_message}).execute().data[0]
+        if session["title"] == "Nueva conversación":
+            db.table("chat_sessions").update({"title": user_message[:80]}).eq("id", str(body.session_id)).execute()
 
     # La consulta se realiza DESPUÉS de persistir el mensaje actual: Gemini ve
     # únicamente los últimos N mensajes de esta sesión, nunca todo Supabase.
@@ -329,6 +343,11 @@ def chat_with_persistence(
         parts: list[str] = []
         try:
             for text in agent.stream_chat(user_message):
+                if text is STREAM_RESET:
+                    # La respuesta se cortó y vuelve a empezar: el frontend borra lo parcial.
+                    parts.clear()
+                    yield sse_event("response.output_text.reset", {"type": "response.output_text.reset", "response_id": response_id})
+                    continue
                 parts.append(text)
                 yield sse_event("response.output_text.delta", {"type": "response.output_text.delta", "response_id": response_id, "delta": text})
             answer = "".join(parts)
@@ -399,6 +418,9 @@ async def create_response(
             })
             try:
                 for text in agent.stream_chat(user_message):
+                    if text is STREAM_RESET:
+                        yield sse_event("response.output_text.reset", {"type": "response.output_text.reset", "response_id": response_id})
+                        continue
                     yield sse_event("response.output_text.delta", {
                         "type": "response.output_text.delta", "response_id": response_id, "delta": text,
                     })

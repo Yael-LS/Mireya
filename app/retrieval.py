@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from app.chunking import Chunk, load_and_chunk
 from app.embeddings import embed_documents, embed_query
@@ -56,5 +57,8 @@ def ingest_memory(text: str) -> list[str]:
     vectors = embed_documents([clean_text])
     client = app.vectorstore.get_client()
     app.vectorstore.ensure_collection(client)
-    app.vectorstore.index_chunks(client, chunks, vectors)
+    # Fecha de alta: Qdrant no la guarda por sí solo y sin ella no se sabe cuándo llegó cada recuerdo.
+    created_at = datetime.now(timezone.utc).isoformat()
+    app.vectorstore.index_chunks(client, chunks, vectors, {"created_at": created_at})
+    logging.getLogger("retrieval").info(f"[recuerdo] {chunks[0].id} guardado el {created_at} ({len(clean_text)} caracteres)")
     return [chunk.id for chunk in chunks]

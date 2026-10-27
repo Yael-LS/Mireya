@@ -40,6 +40,13 @@ def config_for(model: str, config: types.GenerateContentConfig) -> types.Generat
         return config.model_copy(update={"thinking_config": None})
     return config
 
+class StreamReset:
+    """Señal dentro del stream: el texto emitido hasta ahora se descarta porque
+    la respuesta vuelve a empezar (con otro intento u otro modelo)."""
+
+
+STREAM_RESET = StreamReset()
+
 MAX_RETRIES_PER_MODEL = 1        # reintentos extra sobre el intento inicial
 RETRY_DELAY_SECONDS = 1.5
 RETRYABLE_STATUS_CODES = {429, 500, 503, 504}
@@ -239,12 +246,12 @@ class CVAgent:
             thinking_config=THINKING,
         )
 
-    def _stream_with_resilience(self, config: types.GenerateContentConfig) -> Iterator[str]:
+    def _stream_with_resilience(self, config: types.GenerateContentConfig) -> Iterator[str | StreamReset]:
         """Genera el stream con reintento inmediato y fallback de modelo.
 
-        Solo se reintenta o se conmuta de modelo si TODAVÍA no se ha emitido
-        ningún chunk al usuario: una vez que el usuario ya está viendo texto,
-        reiniciar la llamada duplicaría o cortaría la respuesta.
+        Si el fallo llega cuando el usuario ya está viendo texto, se emite
+        STREAM_RESET para que se descarte esa respuesta a medias y se reintenta
+        igual que un fallo al inicio, en vez de dejarla cortada.
         """
         models_to_try = list(dict.fromkeys([GENERATION_MODEL, *FALLBACK_MODELS]))
 
@@ -286,8 +293,8 @@ class CVAgent:
                 except Exception as e:
                     last_error = e
                     if started_yielding:
-                        logger.error(f"Fallo a medio streaming con {model_name}: {e}")
-                        raise
+                        logger.error(f"Fallo a medio streaming con {model_name}: {e}; se reinicia la respuesta")
+                        yield STREAM_RESET
                     if not _is_retryable(e):
                         logger.error(f"Error no reintentable con {model_name}: {e}")
                         break
@@ -308,15 +315,21 @@ class CVAgent:
         if last_error:
             raise last_error
 
-    def stream_chat(self, user_message: str) -> Iterator[str]:
-        """Genera texto incremental de Gemini usando el contexto RAG recuperado."""
+    def stream_chat(self, user_message: str) -> Iterator[str | StreamReset]:
+        """Genera texto incremental de Gemini usando el contexto RAG recuperado.
+
+        Puede emitir STREAM_RESET: quien consume debe descartar lo recibido.
+        """
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_message)])
         )
         config = self._generation_config(user_message)
         output_parts: list[str] = []
         for text in self._stream_with_resilience(config):
-            output_parts.append(text)
+            if text is STREAM_RESET:
+                output_parts.clear()
+            else:
+                output_parts.append(text)
             yield text
 
         if output_parts:
@@ -326,4 +339,10 @@ class CVAgent:
 
     def chat(self, user_message: str) -> str:
         """Compatibilidad para consumidores que solicitan respuesta no streaming."""
-        return "".join(self.stream_chat(user_message))
+        parts: list[str] = []
+        for text in self.stream_chat(user_message):
+            if text is STREAM_RESET:
+                parts.clear()
+            else:
+                parts.append(text)
+        return "".join(parts)

@@ -50,12 +50,14 @@ def point_id(chunk_id: str) -> str:
 
 
 # Indexa los chunks y sus vectores almacenando el texto en el payload
-def index_chunks(client: QdrantClient, chunks: list[Chunk], vectors: list[list[float]]) -> None:
+def index_chunks(
+    client: QdrantClient, chunks: list[Chunk], vectors: list[list[float]], extra_payload: dict | None = None
+) -> None:
     points = [
         PointStruct(
             id=point_id(chunks[i].id),
             vector=vectors[i],
-            payload={"chunk_id": chunks[i].id, "section": chunks[i].section, "text": chunks[i].text},
+            payload={"chunk_id": chunks[i].id, "section": chunks[i].section, "text": chunks[i].text, **(extra_payload or {})},
         )
         for i in range(len(chunks))
     ]
