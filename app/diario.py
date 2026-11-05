@@ -146,12 +146,14 @@ def search_songs(request: Request, q: str = Query(min_length=1, max_length=120),
         raise HTTPException(status_code=502, detail="Spotify no respondió. Intenta otra vez en un momento.")
     songs = []
     for track in response.json().get("tracks", {}).get("items", []):
-        images = track.get("album", {}).get("images") or []
+        album = track.get("album", {})
+        images = album.get("images") or []
         songs.append({
             "id": track["id"],
             "t": track["name"],
             "a": ", ".join(artist["name"] for artist in track["artists"]),
-            "art": images[-1]["url"] if images else None,
+            "album": album.get("name"),
+            "art": images[min(1, len(images) - 1)]["url"] if images else None,
         })
     return songs
 
