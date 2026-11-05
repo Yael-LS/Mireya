@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from app.agent import CVAgent, STREAM_RESET
 from app.database import get_supabase
 from app.diario import router as diario_router
+from app.diario_lock import router as diario_lock_router
 from app.ideas import router as ideas_router
 from app.profile_photo import router as profile_photo_router
 from app.refugio_lock import router as refugio_lock_router
@@ -77,6 +78,7 @@ app.include_router(refugio_lock_router)
 app.include_router(refugio_router)
 app.include_router(ideas_router)
 app.include_router(diario_router)
+app.include_router(diario_lock_router)
 app.include_router(profile_photo_router)
 
 # Por defecto acepta clientes web; en producción se puede restringir con CORS_ORIGINS.

@@ -1,0 +1,55 @@
+"""Clave del diario: la suya propia, distinta a la del sitio y a la del Refugio.
+
+Igual que en el Refugio, solo se guarda el hash; la clave nunca vive en el código.
+"""
+
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from app.database import get_supabase
+from app.refugio_lock import PIN_PATTERN, check_pin, hash_pin
+from app.security import limiter, verify_api_key
+
+router = APIRouter(prefix="/api/diario-lock")
+
+TABLE = "diary_lock"
+
+
+def _current() -> dict | None:
+    rows = get_supabase().table(TABLE).select("*").eq("id", 1).execute().data
+    return rows[0] if rows else None
+
+
+def save_pin(pin: str, hint: str) -> None:
+    if not PIN_PATTERN.match(pin):
+        raise ValueError("La clave debe tener 6 números.")
+    get_supabase().table(TABLE).upsert({
+        "id": 1,
+        "pin_hash": hash_pin(pin),
+        "hint": hint.strip()[:200] or None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+
+
+class PinIn(BaseModel):
+    pin: str = Field(min_length=6, max_length=6)
+
+
+@router.get("")
+def lock_status(authorization: str | None = Header(default=None)):
+    """Pista para la pantalla de entrada (nunca la clave)."""
+    verify_api_key(authorization)
+    row = _current()
+    return {"configured": bool(row), "hint": row.get("hint") if row else None}
+
+
+@router.post("/verify")
+@limiter.limit("10/minute")
+def verify_pin(request: Request, body: PinIn, authorization: str | None = Header(default=None)):
+    verify_api_key(authorization)
+    row = _current()
+    if not row or not check_pin(body.pin, row["pin_hash"]):
+        raise HTTPException(status_code=401, detail="Esa no es la clave del diario.")
+    return {"ok": True}

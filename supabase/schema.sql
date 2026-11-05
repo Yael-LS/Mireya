@@ -129,5 +129,13 @@ select name, color from (values
 ) as ejemplos(name, color)
 where not exists (select 1 from public.diary_folders);
 
+-- Clave del diario (una sola fila; solo el hash, nunca la clave).
+create table if not exists public.diary_lock (
+  id int primary key default 1 check (id = 1),
+  pin_hash text not null,
+  hint text,
+  updated_at timestamptz not null default now()
+);
+
 -- El backend usa SUPABASE_SERVICE_ROLE_KEY. Si se habilita acceso directo desde
 -- el navegador, activa RLS y crea políticas ligadas a auth.uid() antes de ello.
