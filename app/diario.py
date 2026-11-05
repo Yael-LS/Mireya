@@ -108,7 +108,9 @@ def save_entry(day: date, body: EntryIn, authorization: str | None = Header(defa
     if body.clear_folder:
         row["folder_id"] = None
     elif body.folder_id is not None:
-        row["folder_id"] = str(body.folder_id)
+        # Una hoja pendiente en otro equipo puede apuntar a una carpetita que ya se borró.
+        exists = get_supabase().table(FOLDERS).select("id").eq("id", str(body.folder_id)).execute().data
+        row["folder_id"] = str(body.folder_id) if exists else None
     get_supabase().table(ENTRIES).upsert(row).execute()
     return {"ok": True}
 
@@ -193,6 +195,13 @@ def update_folder(folder_id: uuid.UUID, body: FolderPatch, authorization: str | 
     if not result.data:
         raise HTTPException(status_code=404, detail="No encontré esa carpetita.")
     return result.data[0]
+
+
+@router.delete("/folders/{folder_id}", status_code=204)
+def delete_folder(folder_id: uuid.UUID, authorization: str | None = Header(default=None)):
+    """Las hojas no se borran: quedan como hojas sueltas."""
+    verify_api_key(authorization)
+    get_supabase().table(FOLDERS).delete().eq("id", str(folder_id)).execute()
 
 
 # ---------- Cartas a su yo del futuro ----------

@@ -37,6 +37,12 @@ class PinIn(BaseModel):
     pin: str = Field(min_length=6, max_length=6)
 
 
+class PinChange(BaseModel):
+    current_pin: str = Field(min_length=6, max_length=6)
+    new_pin: str = Field(pattern=r"^\d{6}$")
+    hint: str = Field(default="", max_length=200)
+
+
 @router.get("")
 def lock_status(authorization: str | None = Header(default=None)):
     """Pista para la pantalla de entrada (nunca la clave)."""
@@ -52,4 +58,15 @@ def verify_pin(request: Request, body: PinIn, authorization: str | None = Header
     row = _current()
     if not row or not check_pin(body.pin, row["pin_hash"]):
         raise HTTPException(status_code=401, detail="Esa no es la clave del diario.")
+    return {"ok": True}
+
+
+@router.post("/change")
+@limiter.limit("5/minute")
+def change_pin(request: Request, body: PinChange, authorization: str | None = Header(default=None)):
+    verify_api_key(authorization)
+    row = _current()
+    if not row or not check_pin(body.current_pin, row["pin_hash"]):
+        raise HTTPException(status_code=401, detail="La clave actual no es correcta.")
+    save_pin(body.new_pin, body.hint)
     return {"ok": True}
