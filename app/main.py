@@ -20,10 +20,12 @@ from app.database import get_supabase
 from app.diario import router as diario_router
 from app.diario_lock import router as diario_lock_router
 from app.ideas import router as ideas_router
+from app.recuerdos import clean_caption, read_memory, remove_photo, router as recuerdos_router, upload_photo
 from app.profile_photo import router as profile_photo_router
 from app.refugio_lock import router as refugio_lock_router
 from app.refugio import classify_memory, router as refugio_router
 from app.retrieval import index_cv, ingest_memory
+from app.vectorstore import point_id
 from app.security import limiter, require_api_key, verify_api_key
 from google.genai import types
 
@@ -80,6 +82,7 @@ app.include_router(ideas_router)
 app.include_router(diario_router)
 app.include_router(diario_lock_router)
 app.include_router(profile_photo_router)
+app.include_router(recuerdos_router)
 
 # Por defecto acepta clientes web; en producción se puede restringir con CORS_ORIGINS.
 cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
@@ -153,6 +156,10 @@ class ChatRequest(BaseModel):
 
 class IngestRequest(BaseModel):
     text: str
+    # Foto opcional del recuerdo; no se vectoriza.
+    photo_base64: str | None = None
+    photo_type: str | None = None
+    photo_caption: str | None = None
 
 
 def _extract_text_from_content(content: Union[str, List[ContentPart]]) -> str:
@@ -279,15 +286,28 @@ def ingest(request: Request, body: IngestRequest, authorization: str | None = He
         raise HTTPException(status_code=422, detail="El recuerdo no puede estar vacío.")
     if len(text) > 10_000:
         raise HTTPException(status_code=400, detail="El recuerdo excede 10,000 caracteres.")
+    # La foto se sube antes: si no es válida, el recuerdo no se guarda a medias.
+    photo: dict = {}
+    if body.photo_base64:
+        photo["photo_path"] = upload_photo(body.photo_base64, body.photo_type or "")
+        if clean_caption(body.photo_caption):
+            photo["photo_caption"] = clean_caption(body.photo_caption)
     try:
-        chunk_ids = ingest_memory(text)
+        chunk_ids = ingest_memory(text, photo)
     except Exception:
         logger.exception("Error al ingestar recuerdo")
+        remove_photo(photo.get("photo_path"))
         raise HTTPException(status_code=500, detail="No se pudo guardar el recuerdo en el RAG.")
 
     # El recuerdo ya quedó guardado; si además le hace bien, también llega al Refugio.
     added, suggestions = classify_memory(text, chunk_ids[0] if chunk_ids else None)
-    return {"ok": True, "chunks": len(chunk_ids), "refugio": added, "refugio_suggestions": suggestions}
+    memory = None
+    try:
+        # Mismo formato que GET /api/recuerdos, para mostrarlo sin recargar la lista.
+        memory = read_memory(point_id(chunk_ids[0]))
+    except Exception:
+        logger.exception("Recuerdo guardado, pero no se pudo leer de vuelta")
+    return {"ok": True, "chunks": len(chunk_ids), "memory": memory, "refugio": added, "refugio_suggestions": suggestions}
 
 
 @app.post("/api/chat")

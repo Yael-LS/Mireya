@@ -44,9 +44,10 @@ def retrieve(query: str, top_k: int = 4) -> list[dict]:
     return results
 
 
-def ingest_memory(text: str) -> list[str]:
+def ingest_memory(text: str, extra_payload: dict | None = None) -> list[str]:
     """Vectoriza un recuerdo libre, lo añade a la colección RAG existente y
-    devuelve los ids de sus chunks."""
+    devuelve los ids de sus chunks. `extra_payload` guarda datos que no se
+    vectorizan, como la foto del recuerdo."""
     clean_text = text.strip()
     if not clean_text:
         return []
@@ -59,6 +60,6 @@ def ingest_memory(text: str) -> list[str]:
     app.vectorstore.ensure_collection(client)
     # Fecha de alta: Qdrant no la guarda por sí solo y sin ella no se sabe cuándo llegó cada recuerdo.
     created_at = datetime.now(timezone.utc).isoformat()
-    app.vectorstore.index_chunks(client, chunks, vectors, {"created_at": created_at})
+    app.vectorstore.index_chunks(client, chunks, vectors, {**(extra_payload or {}), "created_at": created_at})
     logging.getLogger("retrieval").info(f"[recuerdo] {chunks[0].id} guardado el {created_at} ({len(clean_text)} caracteres)")
     return [chunk.id for chunk in chunks]
