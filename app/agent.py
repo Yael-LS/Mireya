@@ -237,6 +237,15 @@ class CVAgent:
         context = buscar_info_cv(user_message)
         spotify_info = _resolver_enlaces_spotify(self.client, context, user_message)
         prompt_context = f"{context}\n{spotify_info}".strip()
+        # Su Playlist: canciones elegidas, series y lo que ella quiso compartir.
+        from app.acompana import chat_context
+
+        companion = chat_context()
+        if companion:
+            prompt_context += (
+                "\n\nSU PLAYLIST (canciones y series que Mireya registró en su espacio "
+                f"«Playlist»):\n{companion}"
+            )
         instruction = SYSTEM_INSTRUCTION
         if self.mode == "nostalgia":
             instruction = f"{instruction}\n\n{NOSTALGIA_INSTRUCTION}"

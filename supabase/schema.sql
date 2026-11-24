@@ -137,5 +137,75 @@ create table if not exists public.diary_lock (
   updated_at timestamptz not null default now()
 );
 
+-- ---------- Lo que me acompaña: canciones y series de cada etapa ----------
+create table if not exists public.companion_songs (
+  id uuid primary key default gen_random_uuid(),
+  spotify_id text,
+  title text not null,
+  artist text not null,
+  album text,
+  cover_url text,
+  spotify_url text,
+  lyric text,
+  note text,
+  mood text check (mood in ('heartbreak', 'strength', 'nostalgia', 'dance')),
+  mood_label text,
+  share boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists companion_songs_created_idx on public.companion_songs (created_at desc);
+
+-- Canción del día, de la semana (period = lunes) y del mes (period = día 1).
+create table if not exists public.companion_picks (
+  kind text not null check (kind in ('day', 'week', 'month')),
+  period date not null,
+  song_id uuid not null references public.companion_songs(id) on delete cascade,
+  primary key (kind, period)
+);
+
+create table if not exists public.companion_series (
+  id uuid primary key default gen_random_uuid(),
+  tmdb_id int unique,
+  title text not null,
+  alt_title text,
+  original_title text,
+  poster_url text,
+  backdrop_url text,
+  kind text not null default 'series',
+  year text,
+  seasons jsonb not null default '[]',
+  total_episodes int not null default 0,
+  status text not null default 'watching' check (status in ('pending', 'watching', 'finished', 'paused', 'dropped')),
+  note text,
+  characters text[] not null default '{}',
+  final_opinion text,
+  rating int check (rating between 1 and 5),
+  share boolean not null default true,
+  started_at date,
+  finished_at date,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.companion_episodes (
+  id uuid primary key default gen_random_uuid(),
+  series_id uuid not null references public.companion_series(id) on delete cascade,
+  season int not null,
+  episode int not null,
+  title text,
+  note text,
+  watched_at timestamptz not null default now(),
+  unique (series_id, season, episode)
+);
+create index if not exists companion_episodes_watched_idx on public.companion_episodes (watched_at desc);
+
+-- Lo que el biógrafo escribió de cada mes (se genera solo cuando ella lo pide).
+create table if not exists public.companion_months (
+  month date primary key,
+  summary text not null,
+  updated_at timestamptz not null default now()
+);
+
 -- El backend usa SUPABASE_SERVICE_ROLE_KEY. Si se habilita acceso directo desde
 -- el navegador, activa RLS y crea políticas ligadas a auth.uid() antes de ello.

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from app.acompana import router as acompana_router
 from app.agent import CVAgent, STREAM_RESET
 from app.database import get_supabase
 from app.diario import router as diario_router
@@ -83,6 +84,7 @@ app.include_router(diario_router)
 app.include_router(diario_lock_router)
 app.include_router(profile_photo_router)
 app.include_router(recuerdos_router)
+app.include_router(acompana_router)
 
 # Por defecto acepta clientes web; en producción se puede restringir con CORS_ORIGINS.
 cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
