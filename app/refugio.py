@@ -21,6 +21,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from google import genai
 from google.genai import errors, types
 from pydantic import BaseModel, Field
+from qdrant_client.models import PointIdsList
 
 import app.vectorstore
 from app.agent import FALLBACK_MODELS, THINKING, config_for
@@ -484,6 +485,27 @@ def delete_item(item_id: uuid.UUID, authorization: str | None = Header(default=N
     # Un momento borrado no deja su foto olvidada en el bucket.
     for row in deleted:
         remove_photo(row.get("photo_path"))
+        # El momento que ella agregó a mano también se guardó como recuerdo para el chat
+        # (ver add_moment): se olvida con él. Lo que el clasificador sacó de un recuerdo
+        # suyo (source "memory") no, porque ese recuerdo cuenta más cosas.
+        if row.get("kind") == "moment" and row.get("source") == "manual":
+            forget_memory(row.get("source_ref"))
+
+
+def forget_memory(chunk_id: str | None) -> None:
+    if not chunk_id or not chunk_id.startswith("memory-"):
+        return
+    try:
+        client = app.vectorstore.get_client()
+        pid = app.vectorstore.point_id(chunk_id)
+        points = client.retrieve(COLLECTION_NAME, ids=[pid], with_payload=True, with_vectors=False)
+        payload = (points[0].payload or {}) if points else {}
+        # Solo si de verdad es ese recuerdo; el perfil base nunca se toca.
+        if payload.get("section") == app.vectorstore.MEMORY_SECTION and payload.get("chunk_id") == chunk_id:
+            client.delete(COLLECTION_NAME, points_selector=PointIdsList(points=[pid]))
+            logger.info(f"[recuerdo] {chunk_id} olvidado al borrar su momento del Refugio")
+    except Exception:
+        logger.exception(f"No se pudo olvidar el recuerdo {chunk_id}")
 
 
 @router.post("/items/{item_id}/photo")
