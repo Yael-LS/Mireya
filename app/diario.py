@@ -12,7 +12,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.database import get_supabase
-from app.refugio import BUCKET, PHOTO_TYPES, SIGNED_URL_SECONDS, _decode_photo, _ensure_bucket
+from app.refugio import BUCKET, SIGNED_URL_SECONDS, upload_photo_to
 from app.security import limiter, verify_api_key
 from app.spotify_client import SEARCH_URL, _get_access_token
 
@@ -123,10 +123,7 @@ class PhotoIn(BaseModel):
 @router.post("/photos", status_code=201)
 def upload_photo(body: PhotoIn, authorization: str | None = Header(default=None)):
     verify_api_key(authorization)
-    data = _decode_photo(body.photo_base64, body.photo_type)
-    _ensure_bucket()
-    path = f"diario/{uuid.uuid4().hex}.{PHOTO_TYPES[body.photo_type]}"
-    get_supabase().storage.from_(BUCKET).upload(path, data, {"content-type": body.photo_type})
+    path = upload_photo_to("diario", body.photo_base64, body.photo_type)
     return {"path": path, "url": _signed_urls([path]).get(path)}
 
 

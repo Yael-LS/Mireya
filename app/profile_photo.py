@@ -44,10 +44,10 @@ def get_photo(authorization: str | None = Header(default=None)):
 @limiter.limit("10/minute")
 def set_photo(request: Request, body: AvatarIn, authorization: str | None = Header(default=None)):
     verify_api_key(authorization)
-    data = _decode_photo(body.photo_base64, body.photo_type)
+    data, photo_type = _decode_photo(body.photo_base64, body.photo_type)
     _ensure_bucket()
     get_supabase().storage.from_(BUCKET).upload(
-        PHOTO_PATH, data, {"content-type": body.photo_type, "upsert": "true"}
+        PHOTO_PATH, data, {"content-type": photo_type, "upsert": "true"}
     )
     return {"url": _signed_url()}
 

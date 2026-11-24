@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 import app.vectorstore
 from app.config import COLLECTION_NAME
 from app.database import get_supabase
-from app.refugio import BUCKET, PHOTO_TYPES, SIGNED_URL_SECONDS, _decode_photo, _ensure_bucket
+from app.refugio import BUCKET, SIGNED_URL_SECONDS, remove_photo, upload_photo_to
 from app.security import limiter, verify_api_key
 
 logger = logging.getLogger("recuerdos")
@@ -25,21 +25,7 @@ MAX_CAPTION = 40
 
 
 def upload_photo(photo_base64: str, photo_type: str) -> str:
-    data = _decode_photo(photo_base64, photo_type)
-    _ensure_bucket()
-    path = f"recuerdos/{uuid.uuid4().hex}.{PHOTO_TYPES[photo_type]}"
-    get_supabase().storage.from_(BUCKET).upload(path, data, {"content-type": photo_type})
-    return path
-
-
-def remove_photo(path: str | None) -> None:
-    if not path:
-        return
-    try:
-        get_supabase().storage.from_(BUCKET).remove([path])
-    except Exception:
-        # Una foto huérfana en el bucket no rompe nada; el recuerdo ya no la apunta.
-        logger.exception(f"No se pudo borrar la foto {path}")
+    return upload_photo_to("recuerdos", photo_base64, photo_type)
 
 
 def clean_caption(caption: str | None) -> str | None:

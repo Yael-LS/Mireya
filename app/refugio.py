@@ -6,6 +6,7 @@ ella guarda (clasificados automáticamente con Gemini) y lo que agrega a mano.
 
 import base64
 import binascii
+import io
 import logging
 import os
 import random
@@ -44,6 +45,9 @@ AUTO_ADD_CONFIDENCE = 0.75   # se agrega solo
 SUGGEST_CONFIDENCE = 0.45    # se le pregunta a ella antes de agregar
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 PHOTO_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+# Llegan tal cual cuando el celular no pudo reducirlas; el servidor las pasa a JPG.
+CONVERTIBLE_TYPES = {"image/heic", "image/heif", "image/avif"}
+PHOTO_MAX_SIDE = 1600
 SIGNED_URL_SECONDS = 60 * 60
 
 CLASSIFIER_INSTRUCTION = """
@@ -338,25 +342,60 @@ def _ensure_bucket() -> None:
     _bucket_ready = True
 
 
-def _decode_photo(photo_base64: str, photo_type: str) -> bytes:
-    """Valida tipo y tamaño de una foto enviada como base64 (o data URL)."""
-    if photo_type not in PHOTO_TYPES:
-        raise HTTPException(status_code=415, detail="La foto debe ser JPG, PNG o WEBP.")
+def _to_jpeg(data: bytes) -> bytes:
+    """Convierte una foto que el navegador no pudo reducir (HEIC de Android, por
+    ejemplo) a un JPG de 1600 px, respetando su orientación."""
+    import pillow_heif
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    pillow_heif.register_heif_opener()
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((PHOTO_MAX_SIDE, PHOTO_MAX_SIDE))
+            out = io.BytesIO()
+            image.save(out, "JPEG", quality=85)
+            return out.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=415, detail="No pude leer esa foto. Prueba con otra o toma una captura de pantalla.")
+
+
+def _decode_photo(photo_base64: str, photo_type: str) -> tuple[bytes, str]:
+    """Valida tipo y tamaño de una foto enviada como base64 (o data URL) y
+    devuelve sus bytes y su tipo final: lo que no es JPG, PNG o WEBP sale en JPG."""
+    if photo_type not in PHOTO_TYPES and photo_type not in CONVERTIBLE_TYPES:
+        raise HTTPException(status_code=415, detail="La foto debe ser JPG, PNG, WEBP o HEIC.")
     try:
         data = base64.b64decode(photo_base64.split(",", 1)[-1], validate=True)
     except (binascii.Error, ValueError):
         raise HTTPException(status_code=422, detail="La foto no se pudo leer.")
     if len(data) > MAX_PHOTO_BYTES:
         raise HTTPException(status_code=413, detail="La foto es demasiado grande (máx. 5 MB).")
-    return data
+    if photo_type in CONVERTIBLE_TYPES:
+        return _to_jpeg(data), "image/jpeg"
+    return data, photo_type
+
+
+def upload_photo_to(folder: str, photo_base64: str, photo_type: str) -> str:
+    data, final_type = _decode_photo(photo_base64, photo_type)
+    _ensure_bucket()
+    path = f"{folder}/{uuid.uuid4().hex}.{PHOTO_TYPES[final_type]}"
+    get_supabase().storage.from_(BUCKET).upload(path, data, {"content-type": final_type})
+    return path
+
+
+def remove_photo(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        get_supabase().storage.from_(BUCKET).remove([path])
+    except Exception:
+        # Una foto huérfana en el bucket no rompe nada; ya nadie la apunta.
+        logger.exception(f"No se pudo borrar la foto {path}")
 
 
 def _upload_photo(photo_base64: str, photo_type: str) -> str:
-    data = _decode_photo(photo_base64, photo_type)
-    _ensure_bucket()
-    path = f"momentos/{uuid.uuid4().hex}.{PHOTO_TYPES[photo_type]}"
-    get_supabase().storage.from_(BUCKET).upload(path, data, {"content-type": photo_type})
-    return path
+    return upload_photo_to("momentos", photo_base64, photo_type)
 
 
 def _with_photo_urls(items: list[dict]) -> list[dict]:
@@ -441,17 +480,27 @@ def update_item(item_id: uuid.UUID, body: ItemPatch, authorization: str | None =
 @router.delete("/items/{item_id}", status_code=204)
 def delete_item(item_id: uuid.UUID, authorization: str | None = Header(default=None)):
     verify_api_key(authorization)
-    get_supabase().table(TABLE).delete().eq("id", str(item_id)).execute()
+    deleted = get_supabase().table(TABLE).delete().eq("id", str(item_id)).execute().data or []
+    # Un momento borrado no deja su foto olvidada en el bucket.
+    for row in deleted:
+        remove_photo(row.get("photo_path"))
 
 
 @router.post("/items/{item_id}/photo")
 @limiter.limit("20/minute")
 def add_photo(request: Request, item_id: uuid.UUID, body: PhotoIn, authorization: str | None = Header(default=None)):
     verify_api_key(authorization)
+    current = get_supabase().table(TABLE).select("photo_path").eq("id", str(item_id)).execute().data
+    if not current:
+        raise HTTPException(status_code=404, detail="No encontré ese momento.")
     path = _upload_photo(body.photo_base64, body.photo_type)
     result = get_supabase().table(TABLE).update({"photo_path": path}).eq("id", str(item_id)).execute()
     if not result.data:
+        remove_photo(path)
         raise HTTPException(status_code=404, detail="No encontré ese momento.")
+    # Cambiar la foto: la anterior se va del bucket.
+    if current[0].get("photo_path") != path:
+        remove_photo(current[0].get("photo_path"))
     return _with_photo_urls(result.data)[0]
 
 
