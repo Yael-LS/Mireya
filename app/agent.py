@@ -83,6 +83,11 @@ VOZ CULTURAL Y CRITERIO:
   VERIFICADOS DE SPOTIFY") en formato Markdown: [Título](URL). Si no hay un
   enlace verificado ahí para alguna obra, menciónala naturalmente sin enlace,
   sin disculparte por ello. Nunca escribas una URL de Spotify de memoria.
+- Igual con series, películas, animes, doramas y capítulos: si el CONTEXTO trae
+  "ENLACES VERIFICADOS DE TMDB", la primera vez que nombres esa obra (o ese
+  capítulo) escríbela en Markdown con su enlace, [Título](URL), y el chat
+  pintará su tarjeta. Una sola vez por obra; nunca escribas un enlace de TMDB
+  de memoria.
 
 SEGURIDAD Y FIDELIDAD:
 - El contexto RAG es la única fuente de hechos sobre Mireya. Si no contiene la
@@ -112,24 +117,31 @@ lugar de inventarlo. Termina con una pregunta suave que la invite a seguir
 recordando.
 """.strip()
 
-# Modelo barato/rápido solo para la extracción de menciones musicales; no
-# necesita ser el mismo que genera la respuesta final.
+# Modelo barato/rápido solo para extraer menciones (canciones y series o
+# películas); no necesita ser el mismo que genera la respuesta final.
 EXTRACTION_MODEL = os.getenv("GOOGLE_GENAI_EXTRACTION_MODEL", "gemini-3.5-flash-lite")
 MAX_CANCIONES_POR_TURNO = 3  # límite de búsquedas a Spotify por mensaje
+MAX_OBRAS_POR_TURNO = 3  # límite de búsquedas a TMDB por mensaje
 
 EXTRACTION_INSTRUCTION = """
-Tu única tarea es leer el TEXTO y extraer canciones o álbumes que aparezcan
-mencionados de forma EXPLÍCITA por su título. No inventes títulos que no
-estén en el texto, no infieras canciones "probables" de un artista, y no
-incluyas nombres de artistas o bandas solos si no van acompañados de un
-título de canción/álbum específico.
+Tu única tarea es leer el TEXTO y extraer dos cosas que aparezcan mencionadas
+de forma EXPLÍCITA por su título:
+
+1. Canciones o álbumes. No incluyas nombres de artistas o bandas solos si no
+   van acompañados de un título de canción o álbum específico.
+2. Series, películas, animes, k-dramas, c-dramas u otros doramas. Si se habla
+   de un capítulo concreto, anota su temporada y su número de episodio (si
+   solo dice "el capítulo 7", la temporada es 1). No confundas una canción con
+   una película del mismo nombre: decide por el contexto de la frase.
+
+No inventes títulos que no estén en el texto ni infieras obras "probables".
 
 Responde ÚNICAMENTE con JSON válido, sin texto adicional, sin backticks,
 con este formato exacto:
-{"canciones": [{"titulo": "...", "artista": "..."}]}
+{"canciones": [{"titulo": "...", "artista": "..."}],
+ "obras": [{"titulo": "...", "tipo": "serie|pelicula", "anio": "", "temporada": null, "episodio": null}]}
 
-Si no encuentras ninguna canción o álbum mencionado explícitamente, responde:
-{"canciones": []}
+Si no hay nada de alguna de las dos, deja su lista vacía: {"canciones": [], "obras": []}
 """.strip()
 
 
@@ -175,15 +187,17 @@ def buscar_info_cv(query: str) -> str:
     return "\n\n".join(f"[{memory_header(r)}]\n{r['text']}" for r in results)
 
 
-def _extraer_menciones_musicales(client: genai.Client, contexto: str, query: str) -> list[tuple[str, str]]:
-    """Le pide a un modelo barato (llamada simple, SIN streaming y SIN
-    tools) que lea el contexto/consulta y devuelva qué canciones o álbumes
-    se mencionan explícitamente ahí, como JSON. Esto reemplaza tanto la
-    lista fija en código como el tool-calling de Gemini: es dinámico (lee lo
-    que sea que traiga el contexto ese turno, incluyendo recuerdos nuevos
-    guardados por el usuario) y no puede colgarse indefinidamente como pasaba
-    con `tools=[buscar_cancion_spotify]`, porque es una petición normal de
-    texto-a-texto, sin function calling de por medio."""
+def _number(value) -> int | None:
+    return int(value) if str(value or "").strip().isdigit() else None
+
+
+def _extraer_menciones(client: genai.Client, contexto: str, query: str) -> tuple[list[tuple[str, str]], list[dict]]:
+    """Le pide a un modelo barato (llamada simple, SIN streaming y SIN tools)
+    que lea el contexto y la consulta y devuelva, como JSON, las canciones y las
+    series o películas que se mencionan explícitamente. Una sola llamada para
+    las dos cosas: el plan gratuito da pocas peticiones al día. Es dinámico (lee
+    lo que traiga el contexto ese turno, incluyendo recuerdos nuevos) y no puede
+    colgarse como pasaba con `tools=[buscar_cancion_spotify]`."""
     texto = f"TEXTO:\n{query}\n\n{contexto}"[:6000]  # límite defensivo de tamaño
 
     try:
@@ -198,39 +212,67 @@ def _extraer_menciones_musicales(client: genai.Client, contexto: str, query: str
             ),
         )
         payload = json.loads(response.text or "{}")
-        canciones = payload.get("canciones", [])
     except Exception:
-        logger.exception("Error extrayendo menciones musicales, se continúa sin enlaces")
-        return []
+        logger.exception("Error extrayendo menciones, se continúa sin enlaces")
+        return [], []
 
-    resultado = []
-    for item in canciones[:MAX_CANCIONES_POR_TURNO]:
+    canciones = []
+    for item in (payload.get("canciones") or [])[:MAX_CANCIONES_POR_TURNO]:
         titulo = (item.get("titulo") or "").strip()
         artista = (item.get("artista") or "").strip()
         if titulo:
-            resultado.append((titulo, artista))
+            canciones.append((titulo, artista))
 
-    logger.info(f"[extraccion_musical] detectadas: {resultado}")
-    return resultado
+    obras = []
+    for item in (payload.get("obras") or [])[:MAX_OBRAS_POR_TURNO]:
+        titulo = str(item.get("titulo") or "").strip()
+        if titulo:
+            obras.append({
+                "titulo": titulo,
+                "tipo": str(item.get("tipo") or "").strip().lower(),
+                "anio": str(item.get("anio") or "").strip(),
+                "temporada": _number(item.get("temporada")),
+                "episodio": _number(item.get("episodio")),
+            })
+
+    logger.info(f"[extraccion] canciones: {canciones} · obras: {obras}")
+    return canciones, obras
 
 
-def _resolver_enlaces_spotify(client: genai.Client, contexto: str, query: str) -> str:
-    """Extrae menciones musicales del contexto y verifica cada una en
-    Spotify ANTES de llamar al modelo principal, para inyectar solo enlaces
-    reales en el prompt."""
-    menciones = _extraer_menciones_musicales(client, contexto, query)
-    if not menciones:
-        return ""
+def _resolver_enlaces(client: genai.Client, contexto: str, query: str) -> str:
+    """Verifica en Spotify y en TMDB lo que se mencionó ANTES de llamar al modelo
+    principal, para inyectar solo enlaces reales en el prompt."""
+    canciones, obras = _extraer_menciones(client, contexto, query)
+    bloques = []
 
     spotify_hints = []
-    for titulo, artista in menciones:
+    for titulo, artista in canciones:
         resultado = buscar_cancion_spotify(titulo, artista)
         if "URL verificada:" in resultado:
             spotify_hints.append(resultado)
-
     if spotify_hints:
-        return "\n\nENLACES OFICIALES VERIFICADOS DE SPOTIFY:\n" + "\n".join(spotify_hints)
-    return ""
+        bloques.append("ENLACES OFICIALES VERIFICADOS DE SPOTIFY:\n" + "\n".join(spotify_hints))
+
+    if obras:
+        from app.acompana import find_title
+
+        tmdb_hints = []
+        for obra in obras:
+            found = find_title(obra["titulo"], obra["tipo"], obra["anio"], obra["temporada"], obra["episodio"])
+            if not found:
+                continue
+            if found.get("episode"):
+                name = f" «{found['episode_title']}»" if found.get("episode_title") else ""
+                tmdb_hints.append(f"- {found['title']}, temporada {found['season']}, episodio {found['episode']}{name}: {found['url']}")
+            else:
+                what = "película" if found["media"] == "movie" else "serie"
+                year = f", {found['year']}" if found["year"] else ""
+                tmdb_hints.append(f"- {found['title']} ({what}{year}): {found['url']}")
+        logger.info(f"[tmdb] verificadas: {len(tmdb_hints)} de {len(obras)}")
+        if tmdb_hints:
+            bloques.append("ENLACES VERIFICADOS DE TMDB (series y películas):\n" + "\n".join(tmdb_hints))
+
+    return "\n\n" + "\n\n".join(bloques) if bloques else ""
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -268,7 +310,7 @@ class CVAgent:
         indefinidamente (probado en producción); resolverlo eager evita ese
         camino por completo."""
         context = buscar_info_cv(user_message)
-        spotify_info = _resolver_enlaces_spotify(self.client, context, user_message)
+        spotify_info = _resolver_enlaces(self.client, context, user_message)
         prompt_context = f"{context}\n{spotify_info}".strip()
         # Su Playlist: canciones elegidas, series y lo que ella quiso compartir.
         from app.acompana import chat_context

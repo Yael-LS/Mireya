@@ -9,6 +9,7 @@ sepa» encendido.
 import logging
 import os
 import time
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
@@ -393,6 +394,131 @@ def season_episodes(tmdb_id: int, season: int, authorization: str | None = Heade
         })
     _season_cache[(tmdb_id, season)] = (time.time(), episodes)
     return episodes
+
+
+# ---------- Tarjetas de TMDB en el chat ----------
+
+TMDB_SITE = "https://www.themoviedb.org"
+_card_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _norm(text: str | None) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFD", (text or "").lower()) if ch.isalnum())
+
+
+def find_title(titulo: str, tipo: str = "", anio: str = "", temporada: int | None = None, episodio: int | None = None) -> dict | None:
+    """Busca en TMDB una serie o película que se mencionó en el chat y devuelve su
+    enlace verificado (con el capítulo, si se habló de uno). Nunca lanza: si TMDB
+    no responde o no la encuentra, el chat sigue sin tarjeta."""
+    try:
+        found = [r for r in _tmdb("/search/multi", query=titulo, language="es-MX", include_adult="false").get("results", []) if r.get("media_type") in ("tv", "movie")]
+    except HTTPException:
+        return None
+    if not found:
+        return None
+    want = "movie" if tipo.startswith("pel") else ("tv" if tipo else "")
+    target = _norm(titulo)
+
+    def score(r: dict) -> float:
+        names = [r.get("name"), r.get("title"), r.get("original_name"), r.get("original_title")]
+        year = (r.get("first_air_date") or r.get("release_date") or "")[:4]
+        points = 0.0
+        if any(_norm(n) == target for n in names if n):
+            points += 10
+        if want and r["media_type"] == want:
+            points += 4
+        if anio and year == str(anio)[:4]:
+            points += 3
+        if episodio and r["media_type"] == "tv":
+            points += 2
+        return points + min(float(r.get("popularity") or 0), 200) / 100
+
+    best = max(found[:8], key=score)
+    # Sin coincidencia de nombre, solo se acepta si es claramente lo que buscaba.
+    if score(best) < 4:
+        return None
+    media = best["media_type"]
+    item = {
+        "media": media,
+        "id": best["id"],
+        "title": best.get("name") or best.get("title"),
+        "year": (best.get("first_air_date") or best.get("release_date") or "")[:4] or None,
+        "url": f"{TMDB_SITE}/{media}/{best['id']}",
+    }
+    if media == "tv" and episodio:
+        season = temporada or 1
+        try:
+            ep = _tmdb(f"/tv/{best['id']}/season/{season}/episode/{episodio}", language="es-MX")
+            name = None if _generic(ep.get("name"), episodio) else ep.get("name")
+            item.update(season=season, episode=episodio, episode_title=name, url=f"{item['url']}/season/{season}/episode/{episodio}")
+        except HTTPException:
+            pass  # El capítulo no existe: queda la tarjeta de la serie.
+    return item
+
+
+@router.get("/tmdb/card")
+@limiter.limit("120/minute")
+def tmdb_card(request: Request, media: Literal["tv", "movie"], id: int, season: int | None = None, episode: int | None = None, authorization: str | None = Header(default=None)):
+    """Lo que pinta la tarjeta del chat: póster, datos y, si aplica, el capítulo."""
+    verify_api_key(authorization)
+    key = (media, id, season, episode)
+    cached = _card_cache.get(key)
+    if cached and time.time() - cached[0] < 12 * 3600:
+        card = dict(cached[1])
+    else:
+        data = _tmdb(f"/{media}/{id}", language="es-MX")
+        if not data.get("overview"):
+            data["overview"] = _tmdb(f"/{media}/{id}", language="en-US").get("overview")
+        genres = [g["name"] for g in data.get("genres") or []]
+        countries = data.get("origin_country") or [c.get("iso_3166_1") for c in data.get("production_countries") or []]
+        card = {
+            "media": media,
+            "id": id,
+            "title": data.get("name") or data.get("title"),
+            "original_title": data.get("original_name") or data.get("original_title"),
+            "year": (data.get("first_air_date") or data.get("release_date") or "")[:4] or None,
+            "kind": "película" if media == "movie" else KIND_LABELS[_kind(countries, [g["id"] for g in data.get("genres") or []])],
+            "genres": genres[:3],
+            "rating": round(data["vote_average"], 1) if data.get("vote_count", 0) >= 20 and data.get("vote_average") else None,
+            "overview": _clip(data.get("overview"), 280),
+            "poster_url": _image(data.get("poster_path"), "w342"),
+            "backdrop_url": _image(data.get("backdrop_path"), "w780"),
+            "seasons": data.get("number_of_seasons"),
+            "episodes": data.get("number_of_episodes"),
+            "runtime": data.get("runtime") or None,
+            "url": f"{TMDB_SITE}/{media}/{id}",
+            "episode": None,
+        }
+        if media == "tv" and episode:
+            ep = _tmdb(f"/tv/{id}/season/{season or 1}/episode/{episode}", language="es-MX")
+            name = ep.get("name")
+            if not ep.get("overview") or _generic(name, episode):
+                # Muchos doramas no tienen el capítulo en español: se completa con el inglés.
+                english = _tmdb(f"/tv/{id}/season/{season or 1}/episode/{episode}", language="en-US")
+                ep["overview"] = ep.get("overview") or english.get("overview")
+                name = english.get("name") if _generic(name, episode) else name
+            card["episode"] = {
+                "season": season or 1,
+                "episode": episode,
+                "title": None if _generic(name, episode) else name,
+                "still_url": _image(ep.get("still_path"), "w780"),
+                "air_date": ep.get("air_date"),
+                "runtime": ep.get("runtime"),
+                "overview": _clip(ep.get("overview"), 240),
+            }
+            card["url"] = f"{card['url']}/season/{season or 1}/episode/{episode}"
+        _card_cache[key] = (time.time(), card)
+        card = dict(card)
+    # Si está en su Playlist, la tarjeta lo dice (esto no se guarda en caché: cambia seguido).
+    card["playlist"] = None
+    if media == "tv":
+        try:
+            rows = get_supabase().table(SERIES).select("status").eq("tmdb_id", id).limit(1).execute().data
+            if rows:
+                card["playlist"] = STATUS_LABELS.get(rows[0]["status"])
+        except Exception:
+            logger.exception("No se pudo revisar la Playlist para la tarjeta")
+    return card
 
 
 class SeriesIn(BaseModel):
