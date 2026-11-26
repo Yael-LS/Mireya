@@ -7,6 +7,7 @@ de foto; ninguno de los dos se vectoriza, así que cambiarlos no gasta embedding
 
 import logging
 import uuid
+from datetime import date, datetime
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -15,6 +16,7 @@ import app.vectorstore
 from app.config import COLLECTION_NAME
 from app.database import get_supabase
 from app.refugio import BUCKET, SIGNED_URL_SECONDS, remove_photo, upload_photo_to
+from app.agent import CDMX, today_mx
 from app.security import limiter, verify_api_key
 
 logger = logging.getLogger("recuerdos")
@@ -22,6 +24,20 @@ logger = logging.getLogger("recuerdos")
 router = APIRouter(prefix="/api/recuerdos")
 
 MAX_CAPTION = 40
+
+
+def check_happened_on(day: date | None) -> date | None:
+    """Un recuerdo es algo que ya pasó: no se acepta una fecha futura."""
+    if day and day > today_mx():
+        raise HTTPException(status_code=422, detail="Ese día todavía no llega.")
+    return day
+
+
+def _calendar_day(memory: dict) -> str:
+    """El día en que vive en el calendario: cuándo pasó, si no, cuándo lo escribió (en México)."""
+    if memory["happened_on"]:
+        return memory["happened_on"]
+    return datetime.fromisoformat(memory["created_at"]).astimezone(CDMX).date().isoformat()
 
 
 def upload_photo(photo_base64: str, photo_type: str) -> str:
@@ -51,6 +67,8 @@ def _to_memory(point_id, payload: dict, urls: dict[str, str]) -> dict:
         "text": payload.get("text", ""),
         # Los recuerdos anteriores al 26/oct/2026 no tienen fecha.
         "created_at": payload.get("created_at"),
+        # Cuándo pasó, si ella lo eligió ("2026-05-10"); el calendario usa esta antes que created_at.
+        "happened_on": payload.get("happened_on"),
         "photo_url": urls.get(path) if path else None,
         "photo_caption": payload.get("photo_caption") if path else None,
     }
@@ -89,9 +107,10 @@ def list_memories(authorization: str | None = Header(default=None)):
             break
     urls = _signed_urls([payload.get("photo_path") for _, payload in found])
     memories = [_to_memory(point_id, payload, urls) for point_id, payload in found]
-    # Los más nuevos arriba; los que no tienen fecha, al final.
-    dated = sorted((m for m in memories if m["created_at"]), key=lambda m: m["created_at"], reverse=True)
-    return dated + [m for m in memories if not m["created_at"]]
+    # Los más nuevos arriba (por el día en que pasaron); los que no tienen fecha, al final.
+    dated = [m for m in memories if m["happened_on"] or m["created_at"]]
+    dated.sort(key=lambda m: (_calendar_day(m), m["created_at"] or ""), reverse=True)
+    return dated + [m for m in memories if not (m["happened_on"] or m["created_at"])]
 
 
 class MemoryPatch(BaseModel):
@@ -99,6 +118,8 @@ class MemoryPatch(BaseModel):
     photo_type: str | None = None
     photo_caption: str | None = Field(default=None, max_length=200)
     remove_photo: bool = False
+    happened_on: date | None = None
+    clear_happened_on: bool = False
 
 
 @router.patch("/{memory_id}")
@@ -116,7 +137,13 @@ def update_memory(request: Request, memory_id: uuid.UUID, body: MemoryPatch, aut
         payload.pop("photo_caption", None)
         return memory_out(memory_id, payload)
 
+    if body.clear_happened_on and "happened_on" in payload:
+        client.delete_payload(COLLECTION_NAME, keys=["happened_on"], points=[str(memory_id)])
+        payload.pop("happened_on", None)
+
     changes: dict = {}
+    if body.happened_on:
+        changes["happened_on"] = check_happened_on(body.happened_on).isoformat()
     new_path = None
     if body.photo_base64:
         new_path = upload_photo(body.photo_base64, body.photo_type or "")

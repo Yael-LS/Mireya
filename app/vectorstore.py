@@ -102,6 +102,9 @@ def search(client: QdrantClient, query_vector: list[float], top_k: int = 4, scor
             "section": r.payload["section"],
             "text": r.payload["text"],
             "score": r.score,
+            # Solo los recuerdos traen fecha; el perfil base no.
+            "happened_on": r.payload.get("happened_on"),
+            "created_at": r.payload.get("created_at"),
         }
         for r in results
     ]

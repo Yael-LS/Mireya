@@ -5,6 +5,7 @@ import uuid
 import logging
 import json
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Literal, Union, List
 
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ from app.database import get_supabase
 from app.diario import router as diario_router
 from app.diario_lock import router as diario_lock_router
 from app.ideas import router as ideas_router
-from app.recuerdos import clean_caption, read_memory, remove_photo, router as recuerdos_router, upload_photo
+from app.recuerdos import check_happened_on, clean_caption, read_memory, remove_photo, router as recuerdos_router, upload_photo
 from app.profile_photo import router as profile_photo_router
 from app.refugio_lock import router as refugio_lock_router
 from app.refugio import classify_memory, router as refugio_router
@@ -162,6 +163,8 @@ class IngestRequest(BaseModel):
     photo_base64: str | None = None
     photo_type: str | None = None
     photo_caption: str | None = None
+    # Cuándo pasó, si no fue hoy; no se vectoriza.
+    happened_on: date | None = None
 
 
 def _extract_text_from_content(content: Union[str, List[ContentPart]]) -> str:
@@ -288,17 +291,18 @@ def ingest(request: Request, body: IngestRequest, authorization: str | None = He
         raise HTTPException(status_code=422, detail="El recuerdo no puede estar vacío.")
     if len(text) > 10_000:
         raise HTTPException(status_code=400, detail="El recuerdo excede 10,000 caracteres.")
+    happened_on = check_happened_on(body.happened_on)
     # La foto se sube antes: si no es válida, el recuerdo no se guarda a medias.
-    photo: dict = {}
+    extra: dict = {"happened_on": happened_on.isoformat()} if happened_on else {}
     if body.photo_base64:
-        photo["photo_path"] = upload_photo(body.photo_base64, body.photo_type or "")
+        extra["photo_path"] = upload_photo(body.photo_base64, body.photo_type or "")
         if clean_caption(body.photo_caption):
-            photo["photo_caption"] = clean_caption(body.photo_caption)
+            extra["photo_caption"] = clean_caption(body.photo_caption)
     try:
-        chunk_ids = ingest_memory(text, photo)
+        chunk_ids = ingest_memory(text, extra)
     except Exception:
         logger.exception("Error al ingestar recuerdo")
-        remove_photo(photo.get("photo_path"))
+        remove_photo(extra.get("photo_path"))
         raise HTTPException(status_code=500, detail="No se pudo guardar el recuerdo en el RAG.")
 
     # El recuerdo ya quedó guardado; si además le hace bien, también llega al Refugio.
